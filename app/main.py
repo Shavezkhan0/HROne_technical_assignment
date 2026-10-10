@@ -167,6 +167,10 @@ class PunchInIn(BaseModel):
     punched_at: Optional[int] = None
     status: PresenceStatus = PresenceStatus.PRESENT
 
+class PunchOutIn(BaseModel):
+    emp_code: str
+    punched_at: Optional[int] = None
+
 
 # --------------------------------------------------------------------------- #
 # Endpoints provided
@@ -280,7 +284,58 @@ def list_attendance(
 
 # --------------------------------------------------------------------------- #
 # TODO - the rest of the contract (see openapi.yaml):
-#   POST  /attendance/punch-out
+@app.post("/attendance/punch-out", status_code=200)
+def punch_out(body: PunchOutIn):
+    emp = db.employees.find_one({"emp_code": body.emp_code})
+    if not emp:
+        raise HTTPException(404, "employee not found")
+
+    if body.punched_at is not None:
+        ts = from_epoch_ms(body.punched_at)
+    else:
+        ts = datetime.now(timezone.utc)
+    ts = floor_to_second(ts)
+
+    record = db.attendance_logs.find_one(
+        {"emp_code": body.emp_code, "punch_out": None},
+        sort=[("punch_in", -1)]
+    )
+    if not record:
+        raise HTTPException(404, "no open punch-in found")
+        
+    punch_in_ts = record["punch_in"]
+    # Force UTC aware for robust comparison if it's not already
+    if punch_in_ts.tzinfo is None:
+        punch_in_ts = punch_in_ts.replace(tzinfo=timezone.utc)
+        
+    if ts <= punch_in_ts:
+        raise HTTPException(422, "punched_at must be strictly after punch_in")
+        
+    if ts > punch_in_ts + timedelta(hours=24):
+        raise HTTPException(422, "cannot punch out more than 24 hours after punch_in")
+
+    derived = compute_derived(punch_in_ts, ts, emp, record["date"])
+    
+    update_data = {
+        "punch_out": ts,
+        "work_hours": float(derived["work_hours"]),
+        "overtime_minutes": derived["overtime_minutes"],
+        "half_day": derived["half_day"]
+    }
+    
+    res = db.attendance_logs.update_one(
+        {"_id": record["_id"], "punch_out": None},
+        {"$set": update_data}
+    )
+    if res.modified_count == 0:
+        raise HTTPException(409, "already punched out")
+        
+    doc = db.attendance_logs.find_one({"_id": record["_id"]})
+    doc.pop("_id", None)
+    doc["punch_in"] = to_epoch_ms(doc["punch_in"])
+    doc["punch_out"] = to_epoch_ms(doc["punch_out"])
+    return doc
+
 #   PATCH /attendance/{emp_code}/{date}
 #   GET   /analytics/employees/{emp_code}/monthly
 #   GET   /analytics/departments/summary
