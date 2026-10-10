@@ -39,6 +39,7 @@ def startup_db_client():
     # Idempotent index creation
     db.employees.create_index("emp_code", unique=True)
     db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True)
+    db.attendance_logs.create_index([("date", -1), ("emp_code", 1)])
 
 @app.on_event("shutdown")
 def shutdown_db_client():
@@ -162,6 +163,13 @@ class PresenceStatus(str, Enum):
     WFH = "WFH"
     ON_DUTY = "ON_DUTY"
 
+class Status(str, Enum):
+    PRESENT = "PRESENT"
+    ABSENT = "ABSENT"
+    LEAVE = "LEAVE"
+    WFH = "WFH"
+    ON_DUTY = "ON_DUTY"
+
 class PunchInIn(BaseModel):
     emp_code: str
     punched_at: Optional[int] = None
@@ -256,12 +264,26 @@ def punch_in(body: PunchInIn):
 @app.get("/attendance")
 def list_attendance(
     emp_code: Optional[str] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    status: Optional[str] = None,
-    page: int = 1,
-    page_size: int = 20,
+    date_from: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    date_to: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    status: Optional[Status] = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
 ):
+    if date_from:
+        try:
+            date.fromisoformat(date_from)
+        except ValueError:
+            raise HTTPException(422, "invalid date_from")
+    if date_to:
+        try:
+            date.fromisoformat(date_to)
+        except ValueError:
+            raise HTTPException(422, "invalid date_to")
+
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(422, "date_from cannot be after date_to")
+
     q = {}
     if emp_code:
         q["emp_code"] = emp_code
@@ -272,14 +294,42 @@ def list_attendance(
         if date_to:
             q["date"]["$lte"] = date_to
     if status:
-        q["status"] = status
-    docs = list(db.attendance_logs.find(q))
-    docs.sort(key=lambda d: d["date"], reverse=True)
-    total = len(docs)
-    page_docs = docs[(page - 1) * page_size : page * page_size]
-    for d in page_docs:
-        d["id"] = str(d.pop("_id"))
-    return {"items": page_docs, "total": total, "page": page, "page_size": page_size}
+        q["status"] = status.value
+
+    skip = (page - 1) * page_size
+    total = db.attendance_logs.count_documents(q)
+    
+    docs = list(
+        db.attendance_logs.find(q)
+        .sort([("date", -1), ("emp_code", 1)])
+        .skip(skip)
+        .limit(page_size)
+    )
+
+    for d in docs:
+        d.pop("_id", None)
+        d.pop("id", None)
+        
+        if "half_day" not in d:
+            d["half_day"] = False
+        if "history" not in d:
+            d["history"] = []
+            
+        if d.get("punch_in"):
+            d["punch_in"] = to_epoch_ms(d["punch_in"])
+        if d.get("punch_out"):
+            d["punch_out"] = to_epoch_ms(d["punch_out"])
+            
+        for h in d.get("history", []):
+            if isinstance(h.get("timestamp"), datetime):
+                h["timestamp"] = to_epoch_ms(h["timestamp"])
+            if h.get("field") in ("punch_in", "punch_out"):
+                if isinstance(h.get("old_value"), datetime):
+                    h["old_value"] = to_epoch_ms(h["old_value"])
+                if isinstance(h.get("new_value"), datetime):
+                    h["new_value"] = to_epoch_ms(h["new_value"])
+
+    return {"items": docs, "total": total, "page": page, "page_size": page_size}
 
 
 # --------------------------------------------------------------------------- #
