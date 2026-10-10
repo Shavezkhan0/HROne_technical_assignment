@@ -16,6 +16,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
+from enum import Enum
 from pydantic import BaseModel, Field, model_validator, field_validator
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
@@ -156,10 +157,15 @@ class EmployeeIn(BaseModel):
         return self
 
 
+class PresenceStatus(str, Enum):
+    PRESENT = "PRESENT"
+    WFH = "WFH"
+    ON_DUTY = "ON_DUTY"
+
 class PunchInIn(BaseModel):
     emp_code: str
     punched_at: Optional[int] = None
-    status: str = "PRESENT"
+    status: PresenceStatus = PresenceStatus.PRESENT
 
 
 # --------------------------------------------------------------------------- #
@@ -208,25 +214,38 @@ def list_employees(
 @app.post("/attendance/punch-in", status_code=201)
 def punch_in(body: PunchInIn):
     emp = db.employees.find_one({"emp_code": body.emp_code})
-    ts = datetime.fromtimestamp(body.punched_at / 1000) if body.punched_at else datetime.now()
-    d = ts.date().isoformat()
-    if db.attendance_logs.find_one({"emp_code": body.emp_code, "date": d}):
-        raise HTTPException(409, "already punched in for this date")
+    if not emp:
+        raise HTTPException(404, "employee not found")
+
+    if body.punched_at is not None:
+        ts = from_epoch_ms(body.punched_at)
+    else:
+        ts = datetime.now(timezone.utc)
+    ts = floor_to_second(ts)
+
+    d = ist_date_for_punch_in(ts.astimezone(IST), emp["shift_start"], emp["shift_end"])
+    derived = compute_derived(ts, None, emp, d)
+
     doc = {
         "emp_code": body.emp_code,
         "date": d,
-        "status": body.status,
+        "status": body.status.value,
         "punch_in": ts,
         "punch_out": None,
         "work_hours": None,
-        "late_minutes": compute_late_minutes(ts, emp["shift_start"]),
+        "late_minutes": derived["late_minutes"],
         "overtime_minutes": 0,
         "half_day": False,
         "history": [],
     }
-    res = db.attendance_logs.insert_one(doc)
-    doc["id"] = str(res.inserted_id)
+    
+    try:
+        db.attendance_logs.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(409, "already punched in for this date")
+
     doc.pop("_id", None)
+    doc["punch_in"] = to_epoch_ms(doc["punch_in"])
     return doc
 
 

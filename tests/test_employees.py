@@ -1,20 +1,3 @@
-import os
-import pytest
-from fastapi.testclient import TestClient
-
-# Must set test DB before importing app
-os.environ["MONGO_DB"] = "attendance_db_test"
-
-from app.main import app
-
-@pytest.fixture
-def client():
-    with TestClient(app) as c:
-        # DB is initialized by startup event
-        from app.main import db
-        db.employees.delete_many({})
-        yield c
-        db.employees.delete_many({})
 
 def test_health(client):
     res = client.get("/health")
