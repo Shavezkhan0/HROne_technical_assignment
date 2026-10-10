@@ -5,3 +5,6 @@ __pycache__/
 .pytest_cache/
 docs/
 PROBLEM_STATEMENT.docx
+openapi.yaml
+DATA_MODEL.md
+sample_data/
