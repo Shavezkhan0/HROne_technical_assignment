@@ -86,3 +86,39 @@ def test_sample_data():
     derived_4 = compute_derived(in_4, out_4, employee4, "2026-07-07")
     assert derived_4["work_hours"] == 3.50
     assert derived_4["half_day"]
+
+def test_late_minutes_truncation():
+    shift_start = datetime(2026, 7, 6, 9, 30, tzinfo=IST)
+    pi1 = floor_to_second(datetime(2026, 7, 6, 9, 40, 0, 900000, tzinfo=IST))
+    assert late_minutes(pi1, shift_start) == 0
+    pi2 = floor_to_second(datetime(2026, 7, 6, 9, 40, 1, 900000, tzinfo=IST))
+    assert late_minutes(pi2, shift_start) == 10
+
+def test_work_hours_real():
+    in1 = datetime(2026, 7, 6, 9, 30, 0, tzinfo=IST)
+    out1 = datetime(2026, 7, 6, 17, 37, 30, tzinfo=IST)
+    assert work_hours(in1, out1) == Decimal("8.13")
+    
+    in2 = datetime(2026, 7, 6, 9, 30, 0, tzinfo=IST)
+    out2 = datetime(2026, 7, 6, 18, 35, 0, tzinfo=IST)
+    assert work_hours(in2, out2) == Decimal("9.08")
+
+def test_working_days_saturday_join():
+    assert count_working_days("2026-07-04", "2026-07-31") == 20
+
+def test_overnight_shift_overtime():
+    st, et = shift_bounds_for_date("2026-07-06", "22:00", "06:00")
+    po1 = datetime(2026, 7, 7, 6, 40, tzinfo=IST)
+    assert overtime_minutes(po1, et) == 40
+    po2 = datetime(2026, 7, 7, 6, 29, tzinfo=IST)
+    assert overtime_minutes(po2, et) == 0
+
+def test_compute_derived_overnight():
+    emp = {"shift_start": "22:00", "shift_end": "06:00"}
+    pi = datetime(2026, 7, 6, 21, 55, tzinfo=IST)
+    po = datetime(2026, 7, 7, 6, 40, tzinfo=IST)
+    derived = compute_derived(pi, po, emp, "2026-07-06")
+    assert derived["late_minutes"] == 0
+    assert derived["overtime_minutes"] == 40
+    assert derived["work_hours"] == 8.75
+    assert derived["half_day"] is False
