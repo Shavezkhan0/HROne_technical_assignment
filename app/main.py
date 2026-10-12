@@ -724,7 +724,184 @@ def employee_monthly(
         "attendance_pct": attendance_pct
     }
 
-#   GET   /analytics/departments/summary
+
+@app.get("/analytics/departments/summary")
+def department_summary(
+    month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    department: Optional[str] = None
+):
+    try:
+        year_str, month_str = month.split("-")
+        y = int(year_str)
+        m = int(month_str)
+        _, last_day = calendar.monthrange(y, m)
+    except Exception:
+        raise HTTPException(422, "invalid month format")
+
+    first_day_str = f"{month}-01"
+    last_day_str = f"{month}-{last_day:02d}"
+
+    match_emp = {
+        "joined_on": {"$lte": last_day_str}
+    }
+    if department:
+        match_emp["department"] = department
+
+    pipeline = [
+        {"$match": match_emp},
+        {
+            "$lookup": {
+                "from": "attendance_logs",
+                "localField": "emp_code",
+                "foreignField": "emp_code",
+                "pipeline": [
+                    {
+                        "$match": {
+                            "date": {"$gte": first_day_str, "$lte": last_day_str}
+                        }
+                    },
+                    {
+                        "$project": {
+                            "date": 1,
+                            "status": 1,
+                            "work_hours": 1,
+                            "late_minutes": {"$ifNull": ["$late_minutes", 0]},
+                            "overtime_minutes": {"$ifNull": ["$overtime_minutes", 0]},
+                            "half_day_bool": {"$ifNull": ["$half_day", False]},
+                            "parsed_date": {
+                                "$dateFromString": {
+                                    "dateString": "$date",
+                                    "format": "%Y-%m-%d",
+                                    "onError": None,
+                                    "onNull": None
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "$project": {
+                            "status": 1,
+                            "late_minutes": 1,
+                            "overtime_minutes": 1,
+                            "is_weekday": {
+                                "$cond": [
+                                    {"$and": [
+                                        {"$ne": ["$parsed_date", None]},
+                                        {"$lte": [{"$isoDayOfWeek": "$parsed_date"}, 5]}
+                                    ]},
+                                    True,
+                                    False
+                                ]
+                            },
+                            "is_present": {
+                                "$in": ["$status", ["PRESENT", "WFH", "ON_DUTY"]]
+                            },
+                            "half_day_bool": 1,
+                            "work_hours": 1
+                        }
+                    },
+                    {
+                        "$project": {
+                            "status": 1,
+                            "late_minutes": 1,
+                            "overtime_minutes": 1,
+                            "present_contrib": {
+                                "$cond": [
+                                    {"$and": ["$is_weekday", "$is_present"]},
+                                    {"$cond": ["$half_day_bool", 0.5, 1.0]},
+                                    0.0
+                                ]
+                            },
+                            "is_leave": {
+                                "$cond": [{"$eq": ["$status", "LEAVE"]}, 1, 0]
+                            },
+                            "is_on_duty": {
+                                "$cond": [{"$eq": ["$status", "ON_DUTY"]}, 1, 0]
+                            },
+                            "is_late": {
+                                "$cond": [{"$gt": ["$late_minutes", 0]}, 1, 0]
+                            },
+                            "has_wh": {
+                                "$cond": [
+                                    {"$and": ["$is_present", {"$ne": ["$work_hours", None]}]},
+                                    1,
+                                    0
+                                ]
+                            },
+                            "wh_val": {
+                                "$cond": [
+                                    {"$and": ["$is_present", {"$ne": ["$work_hours", None]}]},
+                                    "$work_hours",
+                                    0.0
+                                ]
+                            }
+                        }
+                    }
+                ],
+                "as": "logs"
+            }
+        },
+        {
+            "$project": {
+                "department": 1,
+                "emp_present_days": {"$sum": "$logs.present_contrib"},
+                "emp_late_count": {"$sum": "$logs.is_late"},
+                "emp_late_minutes": {"$sum": "$logs.late_minutes"},
+                "emp_leave_count": {"$sum": "$logs.is_leave"},
+                "emp_on_duty_count": {"$sum": "$logs.is_on_duty"},
+                "emp_wh_sum": {"$sum": "$logs.wh_val"},
+                "emp_wh_count": {"$sum": "$logs.has_wh"}
+            }
+        },
+        {
+            "$group": {
+                "_id": "$department",
+                "headcount": {"$sum": 1},
+                "present_days": {"$sum": "$emp_present_days"},
+                "late_count": {"$sum": "$emp_late_count"},
+                "total_late_minutes": {"$sum": "$emp_late_minutes"},
+                "leave_count": {"$sum": "$emp_leave_count"},
+                "on_duty_count": {"$sum": "$emp_on_duty_count"},
+                "total_wh": {"$sum": "$emp_wh_sum"},
+                "count_wh": {"$sum": "$emp_wh_count"}
+            }
+        },
+        {"$sort": {"_id": 1}}
+    ]
+
+    dept_docs = list(db.employees.aggregate(pipeline))
+    items = []
+    for d in dept_docs:
+        dept_name = d["_id"]
+        headcount = d["headcount"]
+        present_days = float(half_up(d["present_days"], 2))
+        late_count = d["late_count"]
+        total_late_minutes = d["total_late_minutes"]
+        leave_count = d["leave_count"]
+        on_duty_count = d["on_duty_count"]
+        count_wh = d["count_wh"]
+        total_wh = d["total_wh"]
+        if count_wh > 0:
+            avg_work_hours = float(half_up(total_wh / count_wh, 2))
+        else:
+            avg_work_hours = None
+
+        items.append({
+            "department": dept_name,
+            "headcount": headcount,
+            "present_days": present_days,
+            "avg_work_hours": avg_work_hours,
+            "late_count": late_count,
+            "total_late_minutes": total_late_minutes,
+            "leave_count": leave_count,
+            "on_duty_count": on_duty_count
+        })
+
+    return {
+        "month": month,
+        "items": items
+    }
+
 #   GET   /analytics/leaderboard/late
 #   GET   /analytics/departments/{department}/trend
 #   GET   /admin/explain/{endpoint}
