@@ -35,6 +35,14 @@ def test_trend_validation(client):
     assert r_92.status_code == 200
     assert len(r_92.json()["items"]) == 92
 
+    # Exactly 92 days passes: 2026-07-01 to 2026-09-30 (31 + 31 + 30 = 92 days)
+    r_q3 = client.get("/analytics/departments/Engineering/trend?from=2026-07-01&to=2026-09-30")
+    assert r_q3.status_code == 200
+    items_q3 = r_q3.json()["items"]
+    assert len(items_q3) == 92
+    assert items_q3[0]["date"] == "2026-07-01"
+    assert items_q3[-1]["date"] == "2026-09-30"
+
     # 93 days returns 422 (2026-01-01 to 2026-04-03 is 93 days)
     r_93 = client.get("/analytics/departments/Engineering/trend?from=2026-01-01&to=2026-04-03")
     assert r_93.status_code == 422
