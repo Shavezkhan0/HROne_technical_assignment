@@ -988,6 +988,203 @@ def late_leaderboard(
         "items": items
     }
 
-#   GET   /analytics/departments/{department}/trend
-#   GET   /admin/explain/{endpoint}
+
+@app.get("/analytics/departments/{department}/trend")
+def department_trend(
+    department: str,
+    from_date_str: str = Query(..., alias="from", pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    to_date_str: str = Query(..., alias="to", pattern=r"^\d{4}-\d{2}-\d{2}$")
+):
+    try:
+        from_d = date.fromisoformat(from_date_str)
+    except ValueError:
+        raise HTTPException(422, "invalid from date")
+
+    try:
+        to_d = date.fromisoformat(to_date_str)
+    except ValueError:
+        raise HTTPException(422, "invalid to date")
+
+    if from_d > to_d:
+        raise HTTPException(422, "from date cannot be after to date")
+
+    days_span = (to_d - from_d).days + 1
+    if days_span > 92:
+        raise HTTPException(422, "date range exceeds maximum 92 days")
+
+    # Check department existence
+    dept_exists = db.employees.find_one({"department": department})
+    if not dept_exists:
+        raise HTTPException(404, "department not found")
+
+    # Calendar generation inside pipeline via seed doc + $range + $dateAdd
+    pipeline = [
+        {"$documents": [{"_seed": 1}]},
+        {
+            "$project": {
+                "offset": {"$range": [0, days_span]}
+            }
+        },
+        {"$unwind": "$offset"},
+        {
+            "$project": {
+                "_id": 0,
+                "real_date": {
+                    "$dateAdd": {
+                        "startDate": {"$dateFromString": {"dateString": from_date_str}},
+                        "unit": "day",
+                        "amount": "$offset"
+                    }
+                }
+            }
+        },
+        {
+            "$project": {
+                "date": {
+                    "$dateToString": {
+                        "format": "%Y-%m-%d",
+                        "date": "$real_date"
+                    }
+                },
+                "dow": {"$dayOfWeek": "$real_date"}
+            }
+        },
+        # Mon-Fri: dow is 2..6 in MongoDB (1=Sun, 7=Sat)
+        {
+            "$addFields": {
+                "is_working_day": {"$in": ["$dow", [2, 3, 4, 5, 6]]}
+            }
+        },
+        # Daily Headcount: department employees with joined_on <= date
+        {
+            "$lookup": {
+                "from": "employees",
+                "let": {"cal_date": "$date"},
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$expr": {
+                                "$and": [
+                                    {"$eq": ["$department", department]},
+                                    {"$lte": ["$joined_on", "$$cal_date"]}
+                                ]
+                            }
+                        }
+                    },
+                    {"$count": "total"}
+                ],
+                "as": "hc_info"
+            }
+        },
+        # Department attendance records on that date
+        {
+            "$lookup": {
+                "from": "attendance_logs",
+                "let": {"cal_date": "$date"},
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$expr": {"$eq": ["$date", "$$cal_date"]}
+                        }
+                    },
+                    {
+                        "$lookup": {
+                            "from": "employees",
+                            "localField": "emp_code",
+                            "foreignField": "emp_code",
+                            "as": "emp"
+                        }
+                    },
+                    {"$unwind": "$emp"},
+                    {"$match": {"emp.department": department}},
+                    {
+                        "$group": {
+                            "_id": None,
+                            "present_count": {
+                                "$sum": {
+                                    "$cond": [
+                                        {"$in": ["$status", ["PRESENT", "WFH", "ON_DUTY"]]},
+                                        {"$cond": [{"$ifNull": ["$half_day", False]}, 0.5, 1.0]},
+                                        0.0
+                                    ]
+                                }
+                            },
+                            "late_count": {
+                                "$sum": {
+                                    "$cond": [{"$gt": [{"$ifNull": ["$late_minutes", 0]}, 0]}, 1, 0]
+                                }
+                            }
+                        }
+                    }
+                ],
+                "as": "log_info"
+            }
+        },
+        {
+            "$project": {
+                "date": 1,
+                "is_working_day": 1,
+                "headcount": {"$ifNull": [{"$arrayElemAt": ["$hc_info.total", 0]}, 0]},
+                "present_count": {"$ifNull": [{"$arrayElemAt": ["$log_info.present_count", 0]}, 0.0]},
+                "late_count": {"$ifNull": [{"$arrayElemAt": ["$log_info.late_count", 0]}, 0]}
+            }
+        },
+        {
+            "$addFields": {
+                "attendance_rate": {
+                    "$cond": [
+                        {"$and": ["$is_working_day", {"$gt": ["$headcount", 0]}]},
+                        {"$divide": ["$present_count", "$headcount"]},
+                        None
+                    ]
+                }
+            }
+        },
+        {"$sort": {"date": 1}}
+    ]
+
+    rows = list(db.aggregate(pipeline))
+
+    # Python precision rounding & window calculation:
+    # 1. Round each attendance_rate with half_up(..., 4)
+    # 2. moving_avg_7d is the mean of the already-rounded (4 decimals) non-null attendance_rate
+    #    values among the current row and up to 6 preceding rows in the requested range,
+    #    rounded to 4 decimals with half_up(..., 4). Null if no non-null rates in the window.
+    items = []
+    rounded_rates = []
+
+    for idx, r in enumerate(rows):
+        raw_rate = r["attendance_rate"]
+        if raw_rate is not None:
+            rate_val = float(half_up(raw_rate, 4))
+        else:
+            rate_val = None
+        rounded_rates.append(rate_val)
+
+        # 7-day window: [max(0, idx - 6) : idx + 1]
+        window_start = max(0, idx - 6)
+        window_rates = [val for val in rounded_rates[window_start : idx + 1] if val is not None]
+
+        if window_rates:
+            window_mean = sum(Decimal(str(v)) for v in window_rates) / Decimal(len(window_rates))
+            moving_avg = float(half_up(window_mean, 4))
+        else:
+            moving_avg = None
+
+        items.append({
+            "date": r["date"],
+            "is_working_day": r["is_working_day"],
+            "headcount": r["headcount"],
+            "present_count": float(half_up(r["present_count"], 2)),
+            "late_count": r["late_count"],
+            "attendance_rate": rate_val,
+            "moving_avg_7d": moving_avg
+        })
+
+    return {
+        "department": department,
+        "items": items
+    }
+
 # --------------------------------------------------------------------------- #
+
