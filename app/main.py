@@ -10,6 +10,7 @@ openapi.yaml for the contract and DATA_MODEL.md for what is stored in MongoDB.
 """
 import os
 import math
+import calendar
 from datetime import datetime, timedelta, timezone, date
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
@@ -584,7 +585,145 @@ def regularize_attendance(emp_code: str, date: str, body: RegularizeRequest):
     updated_doc = db.attendance_logs.find_one({"_id": record["_id"]})
     return format_attendance_doc(updated_doc)
 
-#   GET   /analytics/employees/{emp_code}/monthly
+
+@app.get("/analytics/employees/{emp_code}/monthly")
+def employee_monthly(
+    emp_code: str,
+    month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+):
+    emp = db.employees.find_one({"emp_code": emp_code})
+    if not emp:
+        raise HTTPException(404, "employee not found")
+
+    try:
+        year_str, month_str = month.split("-")
+        y = int(year_str)
+        m = int(month_str)
+        _, last_day = calendar.monthrange(y, m)
+    except Exception:
+        raise HTTPException(422, "invalid month format")
+
+    first_day_str = f"{month}-01"
+    last_day_str = f"{month}-{last_day:02d}"
+
+    pipeline = [
+        {
+            "$match": {
+                "emp_code": emp_code,
+                "date": {"$gte": first_day_str, "$lte": last_day_str}
+            }
+        },
+        {
+            "$project": {
+                "date": 1,
+                "status": 1,
+                "late_minutes": {"$ifNull": ["$late_minutes", 0]},
+                "overtime_minutes": {"$ifNull": ["$overtime_minutes", 0]},
+                "parsed_date": {
+                    "$dateFromString": {
+                        "dateString": "$date",
+                        "format": "%Y-%m-%d",
+                        "onError": None,
+                        "onNull": None
+                    }
+                },
+                "half_day_bool": {"$ifNull": ["$half_day", False]}
+            }
+        },
+        {
+            "$project": {
+                "status": 1,
+                "late_minutes": 1,
+                "overtime_minutes": 1,
+                "is_weekday": {
+                    "$cond": [
+                        {"$and": [
+                            {"$ne": ["$parsed_date", None]},
+                            {"$lte": [{"$isoDayOfWeek": "$parsed_date"}, 5]}
+                        ]},
+                        True,
+                        False
+                    ]
+                },
+                "is_present": {
+                    "$in": ["$status", ["PRESENT", "WFH", "ON_DUTY"]]
+                },
+                "half_day_bool": 1
+            }
+        },
+        {
+            "$project": {
+                "status": 1,
+                "late_minutes": 1,
+                "overtime_minutes": 1,
+                "present_contrib": {
+                    "$cond": [
+                        {"$and": ["$is_weekday", "$is_present"]},
+                        {"$cond": ["$half_day_bool", 0.5, 1.0]},
+                        0.0
+                    ]
+                },
+                "is_leave": {
+                    "$cond": [{"$eq": ["$status", "LEAVE"]}, 1, 0]
+                },
+                "is_late": {
+                    "$cond": [{"$gt": ["$late_minutes", 0]}, 1, 0]
+                }
+            }
+        },
+        {
+            "$group": {
+                "_id": None,
+                "present_days": {"$sum": "$present_contrib"},
+                "leave_days": {"$sum": "$is_leave"},
+                "late_count": {"$sum": "$is_late"},
+                "total_late_minutes": {"$sum": "$late_minutes"},
+                "total_overtime_minutes": {"$sum": "$overtime_minutes"}
+            }
+        }
+    ]
+
+    agg_results = list(db.attendance_logs.aggregate(pipeline))
+
+    if agg_results:
+        raw_res = agg_results[0]
+        present_days = float(half_up(raw_res.get("present_days", 0.0), 2))
+        leave_days = int(raw_res.get("leave_days", 0))
+        late_count = int(raw_res.get("late_count", 0))
+        total_late_minutes = int(raw_res.get("total_late_minutes", 0))
+        total_overtime_minutes = int(raw_res.get("total_overtime_minutes", 0))
+    else:
+        present_days = 0.0
+        leave_days = 0
+        late_count = 0
+        total_late_minutes = 0
+        total_overtime_minutes = 0
+
+    joined_on = emp["joined_on"]
+    if joined_on > last_day_str:
+        working_days = 0
+        attendance_pct = None
+    else:
+        effective_start = max(first_day_str, joined_on)
+        working_days = count_working_days(effective_start, last_day_str)
+        if working_days == 0:
+            attendance_pct = None
+        else:
+            pct_val = (present_days / working_days) * 100.0
+            attendance_pct = float(half_up(pct_val, 2))
+
+    return {
+        "emp_code": emp_code,
+        "month": month,
+        "working_days": working_days,
+        "present_days": present_days,
+        "leave_days": leave_days,
+        "late_count": late_count,
+        "total_late_minutes": total_late_minutes,
+        "total_overtime_minutes": total_overtime_minutes,
+        "attendance_pct": attendance_pct
+    }
+
 #   GET   /analytics/departments/summary
 #   GET   /analytics/leaderboard/late
 #   GET   /analytics/departments/{department}/trend
