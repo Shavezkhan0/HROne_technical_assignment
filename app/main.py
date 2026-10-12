@@ -41,6 +41,7 @@ def startup_db_client():
     db.employees.create_index("emp_code", unique=True)
     db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True)
     db.attendance_logs.create_index([("date", -1), ("emp_code", 1)])
+    db.attendance_logs.create_index([("date", 1), ("late_minutes", 1)])
 
 @app.on_event("shutdown")
 def shutdown_db_client():
@@ -902,7 +903,91 @@ def department_summary(
         "items": items
     }
 
-#   GET   /analytics/leaderboard/late
+
+@app.get("/analytics/leaderboard/late")
+def late_leaderboard(
+    month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    limit: int = Query(10, ge=1, le=50),
+    department: Optional[str] = None
+):
+    try:
+        year_str, month_str = month.split("-")
+        y = int(year_str)
+        m = int(month_str)
+        _, last_day = calendar.monthrange(y, m)
+    except Exception:
+        raise HTTPException(422, "invalid month format")
+
+    first_day_str = f"{month}-01"
+    last_day_str = f"{month}-{last_day:02d}"
+
+    pipeline = [
+        {
+            "$match": {
+                "date": {"$gte": first_day_str, "$lte": last_day_str},
+                "late_minutes": {"$gt": 0}
+            }
+        },
+        {
+            "$group": {
+                "_id": "$emp_code",
+                "total_late_minutes": {"$sum": "$late_minutes"},
+                "late_count": {"$sum": 1}
+            }
+        },
+        {
+            "$lookup": {
+                "from": "employees",
+                "localField": "_id",
+                "foreignField": "emp_code",
+                "as": "emp"
+            }
+        },
+        {"$unwind": "$emp"}
+    ]
+
+    if department:
+        pipeline.append({"$match": {"emp.department": department}})
+
+    pipeline.extend([
+        {
+            "$setWindowFields": {
+                "sortBy": {"total_late_minutes": -1},
+                "output": {
+                    "rank": {"$rank": {}}
+                }
+            }
+        },
+        {
+            "$match": {
+                "rank": {"$lte": limit}
+            }
+        },
+        {
+            "$sort": {
+                "total_late_minutes": -1,
+                "_id": 1
+            }
+        },
+        {
+            "$project": {
+                "_id": 0,
+                "rank": 1,
+                "emp_code": "$_id",
+                "name": "$emp.name",
+                "department": "$emp.department",
+                "total_late_minutes": 1,
+                "late_count": 1
+            }
+        }
+    ])
+
+    items = list(db.attendance_logs.aggregate(pipeline))
+    return {
+        "month": month,
+        "items": items
+    }
+
 #   GET   /analytics/departments/{department}/trend
 #   GET   /admin/explain/{endpoint}
 # --------------------------------------------------------------------------- #
