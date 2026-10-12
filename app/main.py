@@ -1029,35 +1029,6 @@ def late_leaderboard(
         "items": items
     }
 
-
-@app.get("/analytics/departments/{department}/trend")
-def department_trend(
-    department: str,
-    from_date_str: str = Query(..., alias="from", pattern=r"^\d{4}-\d{2}-\d{2}$"),
-    to_date_str: str = Query(..., alias="to", pattern=r"^\d{4}-\d{2}-\d{2}$")
-):
-    try:
-        from_d = date.fromisoformat(from_date_str)
-    except ValueError:
-        raise HTTPException(422, "invalid from date")
-
-    try:
-        to_d = date.fromisoformat(to_date_str)
-    except ValueError:
-        raise HTTPException(422, "invalid to date")
-
-    if from_d > to_d:
-        raise HTTPException(422, "from date cannot be after to date")
-
-    days_span = (to_d - from_d).days + 1
-    if days_span > 92:
-        raise HTTPException(422, "date range exceeds maximum 92 days")
-
-    # Check department existence
-    dept_exists = db.employees.find_one({"department": department})
-    if not dept_exists:
-        raise HTTPException(404, "department not found")
-
 def build_department_trend_pipeline(
     department: str,
     from_date_str: str,
