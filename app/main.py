@@ -44,6 +44,7 @@ def startup_db_client():
     db.employees.create_index([("department", 1), ("joined_on", 1)])
     db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True)
     db.attendance_logs.create_index([("date", -1), ("emp_code", 1)])
+    db.attendance_logs.create_index([("status", 1), ("date", -1), ("emp_code", 1)])
     db.attendance_logs.create_index([("date", 1), ("late_minutes", 1)])
 
 @app.on_event("shutdown")

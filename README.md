@@ -1,27 +1,53 @@
-# Candidate kit
+# Employee Attendance & Analytics API
 
-Read in this order:
+FastAPI service for employee records, attendance punch-in/out tracking, attendance regularization with audit trail, and department analytics backed by MongoDB.
 
-1. `PROBLEM_STATEMENT.docx`: what you are asked to do, how it is evaluated.
-2. `openapi.yaml`: the API contract and the business rules (R1 - R10).
-3. `DATA_MODEL.md`: what is stored in MongoDB, with nine sample documents.
-4. `app/main.py`: the starter. Put **all** your code in this one file. It must start with `uvicorn app.main:app --port 8000`.
-5. `REVIEW.md`, `DECISIONS.md`: templates to fill in.
+## How to Run
 
-`sample_data/` holds the nine sample documents as MongoDB Extended JSON; `sample_seed.py` loads them. The grader's dataset is
-much larger and contains cases they do not show.
+1. **Virtual environment and dependencies:**
+   ```bash
+   python -m venv .venv
+   # Windows PowerShell:
+   .\.venv\Scripts\Activate.ps1
+   # Linux/macOS:
+   source .venv/bin/activate
 
-## Local setup
+   pip install -r requirements.txt
+   ```
+
+2. **Environment configuration:**
+   Create a `.env` file in the repository root (not committed to git) specifying your MongoDB credentials:
+   ```env
+   MONGO_URI=mongodb://localhost:27017
+   MONGO_DB=attendance_db
+   ```
+
+3. **Start the server:**
+   ```bash
+   uvicorn app.main:app --port 8000
+   ```
+   Interactive OpenAPI documentation is available at `/docs` (http://localhost:8000/docs).
+
+## How to Run Tests
+
+Execute the test suite with pytest:
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env            # set MONGO_URI / MONGO_DB (local docker: docker run -p 27017:27017 mongo:7)
-python sample_seed.py
-uvicorn app.main:app --port 8000 --reload
+pytest -v
 ```
-MongoDB **6.0 or newer** is required (the grader uses 7.0). MongoDB Atlas free tier (M0) works.
+All tests run against the isolated test database `attendance_db_test`, configured in `tests/conftest.py` so development data is untouched.
 
-## Submit
-A public Git repository with `app/main.py`, `requirements.txt`, `REVIEW.md`, `DECISIONS.md` and a short `README.md`.
-No `.env`, no secrets, no Dockerfile.
-# HROne_technical_assignment
+## Implementation Status
+
+All endpoints required by the specification are fully implemented:
+- `GET /health` — Service health and database ping check
+- `POST /employees` — Create employee
+- `GET /employees` — List employees with pagination and department filter
+- `POST /attendance/punch-in` — Record punch-in with shift-aware date and late calculation
+- `POST /attendance/punch-out` — Record punch-out with work hours, overtime, and half-day calculation
+- `GET /attendance` — List attendance logs with date range, status filters, and pagination
+- `PATCH /attendance/{emp_code}/{date}` — Regularize attendance with audit trail
+- `GET /analytics/employees/{emp_code}/monthly` — Monthly summary for an employee
+- `GET /analytics/departments/summary` — Monthly department attendance summary
+- `GET /analytics/leaderboard/late` — Monthly late arrival leaderboard with competition ranking
+- `GET /analytics/departments/{department}/trend` — Department daily attendance and 7-day rolling average
+- `GET /admin/explain/{endpoint}` — MongoDB execution plans for analytics and list queries
